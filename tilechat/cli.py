@@ -11,6 +11,11 @@ Chat with a trained checkpoint::
 
     python -m tilechat chat --checkpoint save/cb_model/final_checkpoint.tar
 
+Chat with sampling instead of greedy argmax (shows the alternative replies
+that exist in the model's distribution; use --seed to make it reproducible)::
+
+    python -m tilechat chat --checkpoint save/cb_model/final_checkpoint.tar --temperature 0.8
+
 Sanity-check the kernels against the PyTorch references on whatever device
 is available::
 
@@ -140,7 +145,10 @@ def cmd_chat(args):
     encoder.eval()
     decoder.eval()
 
-    searcher = GreedySearchDecoder(encoder, decoder)
+    searcher = GreedySearchDecoder(encoder, decoder, temperature=args.temperature, seed=args.seed)
+    if args.temperature > 0:
+        print(f"Sampling at temperature {args.temperature}"
+              + (f" (seed {args.seed})" if args.seed is not None else " (unseeded)"))
     print("Chat away! ('q' or 'quit' to exit)")
     evaluateInput(encoder, decoder, searcher, voc)
 
@@ -222,6 +230,11 @@ def build_parser():
 
     p_chat = sub.add_parser("chat", parents=[common], help="chat with a trained checkpoint")
     p_chat.add_argument("--checkpoint", required=True)
+    p_chat.add_argument("--temperature", type=float, default=0.0,
+                        help="0 = greedy argmax (tutorial default); >0 = sample from the "
+                             "softmax at temperature T (0.7-1.0 shows the alternatives)")
+    p_chat.add_argument("--seed", type=int, default=None,
+                        help="seed for --temperature sampling (reproducible sessions)")
     p_chat.set_defaults(func=cmd_chat)
 
     p_check = sub.add_parser("check", parents=[common], help="verify TileScale kernels vs references")

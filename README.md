@@ -197,6 +197,11 @@ python -m tilechat train --iterations 4000
 # chat with the trained model
 python -m tilechat chat --checkpoint save/cb_model/final_checkpoint.tar
 
+# sampled replies instead of greedy argmax (temperature 0 = tutorial default;
+# ~0.7-1.0 reveals the alternative replies greedy never picks; --seed makes it
+# reproducible)
+python -m tilechat chat --checkpoint save/cb_model/final_checkpoint.tar --temperature 0.8
+
 # force a backend
 TILECHAT_BACKEND=pytorch python -m tilechat train
 python -m tilechat train --backend tilescale

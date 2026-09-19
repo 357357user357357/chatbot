@@ -15,6 +15,10 @@
 # Out-of-vocabulary prompts show "(unknown word)" instead of breaking alignment.
 #
 # Works from any directory: data/checkpoint defaults are anchored to the repo.
+#
+# Extra `tilechat chat` options pass through via CHAT_ARGS, e.g. compare the
+# greedy and sampled personalities of the SAME checkpoint:
+#   CHAT_ARGS="--temperature 0.8 --seed 1" scripts/chat_compare.sh CKPT_A CKPT_A
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,7 +42,7 @@ STEPS="$(grep -vE '^[[:space:]]*(#|$)' "$PROMPTS" | sed 's/^[[:space:]]*//;s/[[:
 # unknown-word error, so the three columns stay aligned 1:1.
 run_ckpt() {
     local ckpt="$1"
-    printf '%s\nq\n' "$STEPS" | "$PY" -m tilechat chat --checkpoint "$ckpt" 2>/dev/null \
+    printf '%s\nq\n' "$STEPS" | "$PY" -m tilechat chat --checkpoint "$ckpt" ${CHAT_ARGS:-} 2>/dev/null \
         | grep -oE 'Bot:.*|Encountered unknown word' \
         | sed -e 's/^Bot:[[:space:]]*//' -e 's/^Encountered unknown word$/(unknown word)/'
 }

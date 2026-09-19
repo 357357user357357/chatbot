@@ -198,14 +198,32 @@ class LuongAttnDecoderRNN(nn.Module):
 
 
 class GreedySearchDecoder(nn.Module):
-    """Greedy decoding loop from the tutorial (uses the decoder above)."""
+    """Greedy decoding loop from the tutorial (uses the decoder above).
 
-    def __init__(self, encoder, decoder):
+    ``temperature=0.0`` (default) is the tutorial's exact argmax walk: every
+    step takes the single most likely token, so one checkpoint always yields
+    the same reply regardless of input while it is undertrained.
+
+    ``temperature > 0`` samples each step from the softmax distribution
+    re-weighted by ``p ** (1 / T)`` (log-probs divided by T): small T
+    approaches argmax, large T flattens it.  This exposes the alternative
+    replies that exist in the model's distribution.  ``seed`` (optional)
+    re-seeds the global generators at the start of every sentence, making a
+    sampled session reproducible.
+    """
+
+    def __init__(self, encoder, decoder, temperature=0.0, seed=None):
         super(GreedySearchDecoder, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
+        if temperature < 0:
+            raise ValueError("temperature must be >= 0 (0 = greedy argmax)")
+        self.temperature = float(temperature)
+        self.seed = None if seed is None else int(seed)
 
     def forward(self, input_seq, input_length, max_length=MAX_LENGTH):
+        if self.seed is not None:
+            torch.manual_seed(self.seed)  # seeds CPU and CUDA generators
         # Forward input through encoder model
         encoder_outputs, encoder_hidden = self.encoder(input_seq, input_length)
         # Prepare encoder's final hidden layer to be the first hidden input to
@@ -220,8 +238,16 @@ class GreedySearchDecoder(nn.Module):
         for _ in range(max_length):
             # Forward pass through decoder
             decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
-            # Obtain most likely word token and its softmax score
-            decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
+            if self.temperature > 0.0:
+                # Sample from the temperature-scaled distribution instead of
+                # argmax (log-space for numerical stability at tiny T)
+                log_probs = decoder_output.clamp_min(1e-12).log() / self.temperature
+                probs = F.softmax(log_probs, dim=1)
+                decoder_input = torch.multinomial(probs, 1).squeeze(1)  # (B,)
+                decoder_scores = probs.gather(1, decoder_input.view(-1, 1)).squeeze(1)
+            else:
+                # Obtain most likely word token and its softmax score
+                decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
             # Record token and score
             all_tokens = torch.cat((all_tokens, decoder_input.view(1, -1)), dim=0)
             all_scores = torch.cat((all_scores, decoder_scores.view(1, -1)), dim=0)

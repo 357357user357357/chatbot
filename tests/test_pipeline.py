@@ -63,3 +63,33 @@ def test_end_to_end_tiny_training(tmp_path):
     assert tokens.shape[0] == 10
     words = [voc.index2word[int(t)] for t in tokens]
     print("input:", sentence, "-> decoded:", " ".join(w for w in words if w not in ("EOS", "PAD")))
+
+
+def test_greedy_decoder_temperature_modes():
+    """temperature=0 must stay exact argmax; temperature>0 must sample."""
+    from tilechat.models import EncoderRNN, GreedySearchDecoder, LuongAttnDecoderRNN, device
+
+    torch.manual_seed(0)
+    V, H, L = 50, 16, 7
+    embedding = torch.nn.Embedding(V, H)
+    encoder = EncoderRNN(V, H, 1, dropout=0.0).to(device).eval()
+    decoder = LuongAttnDecoderRNN(
+        "dot", embedding, H, V, n_layers=1, dropout=0.0, backend="pytorch"
+    ).to(device).eval()
+    seq = torch.randint(3, V, (L, 1), device=device)
+    lengths = torch.tensor([L])
+
+    # 1) default and temperature ~0 both reproduce the tutorial's argmax walk
+    greedy_a, _ = GreedySearchDecoder(encoder, decoder)(seq, lengths, max_length=6)
+    greedy_b, _ = GreedySearchDecoder(encoder, decoder, temperature=1e-6)(seq, lengths, max_length=6)
+    assert torch.equal(greedy_a, greedy_b)
+
+    # 2) seeded sampling is reproducible ...
+    s1a, _ = GreedySearchDecoder(encoder, decoder, temperature=1.0, seed=123)(seq, lengths, max_length=6)
+    s1b, _ = GreedySearchDecoder(encoder, decoder, temperature=1.0, seed=123)(seq, lengths, max_length=6)
+    assert torch.equal(s1a, s1b)
+
+    # 3) ... and a different seed explores a different path (6 draws from a
+    #    near-uniform 50-way distribution colliding is vanishingly unlikely)
+    s2, _ = GreedySearchDecoder(encoder, decoder, temperature=1.0, seed=124)(seq, lengths, max_length=6)
+    assert not torch.equal(s1a, s2)
