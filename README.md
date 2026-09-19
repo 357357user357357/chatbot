@@ -271,8 +271,12 @@ Notes for the 50HX run:
 * Multi-GPU boxes: cuDNN ≥ 9.11 refuses to run in a process that can see
   *any* GPU older than sm_75 — the tutorial encoder's cuDNN GRU then dies
   with "cuDNN version … is not compatible with devices with SM < 7.5".
-  Hide the old card with `CUDA_VISIBLE_DEVICES=0` (the install script does
-  this automatically and prints the line to export).
+  Importing `tilechat` therefore auto-hides sub-sm_75 GPUs from
+  `CUDA_VISIBLE_DEVICES` before CUDA initializes (`tilechat/cuda_guard.py`,
+  prints a notice when it hides something). An explicit
+  `CUDA_VISIBLE_DEVICES` in the environment wins; set
+  `TILECHAT_DISABLE_GPU_FILTER=1` to opt out. The install script exports
+  the same filtered value for interactive shells.
 * `TILECHAT_BACKEND=tilescale python -m tilechat check` is a strict check
   (errors instead of silently falling back).
 * The 10 GB leaves headroom for `--batch-size 128` or

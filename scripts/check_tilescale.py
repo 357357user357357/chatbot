@@ -16,9 +16,12 @@ import os
 import sys
 import time
 
-import torch
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Runs the CUDA_VISIBLE_DEVICES filter (hides sub-sm_75 GPUs, e.g. a GTX 950
+# kept for displays) before torch initializes CUDA -- tilechat/cuda_guard.py.
+import tilechat  # noqa: E402,F401
+import torch  # noqa: E402
 
 
 def _cuda_op_works() -> bool:

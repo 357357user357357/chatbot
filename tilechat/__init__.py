@@ -6,7 +6,14 @@ Kernel language:   https://github.com/tile-ai/tilescale  (``import tilelang``)
 
 __version__ = "1.0.0"
 
-from .data import (  # noqa: F401
+# Must run before the submodule imports below pull in torch and the first
+# CUDA call happens: hides sub-sm_75 GPUs (e.g. a GTX 950 kept for displays)
+# because cuDNN >= 9.11 aborts in any process that can see one.
+from .cuda_guard import filter_cuda_devices as _filter_cuda_devices  # noqa: E402
+
+_filter_cuda_devices()
+
+from .data import (  # noqa: E402,F401
     EOS_token,
     MAX_LENGTH,
     PAD_token,
