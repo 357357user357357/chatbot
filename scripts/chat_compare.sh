@@ -16,9 +16,11 @@
 #
 # Works from any directory: data/checkpoint defaults are anchored to the repo.
 #
-# Extra `tilechat chat` options pass through via CHAT_ARGS, e.g. compare the
-# greedy and sampled personalities of the SAME checkpoint:
-#   CHAT_ARGS="--temperature 0.8 --seed 1" scripts/chat_compare.sh CKPT_A CKPT_A
+# Extra `tilechat chat` options pass through via CHAT_ARGS and apply to BOTH
+# checkpoints, e.g. to compare two checkpoints under sampling:
+#   CHAT_ARGS="--temperature 0.8 --seed 1" scripts/chat_compare.sh CKPT_A CKPT_B
+# Pointing both at the same checkpoint doubles as a determinism check: with a
+# fixed seed the two columns must come out identical.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
