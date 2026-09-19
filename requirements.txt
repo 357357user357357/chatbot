@@ -1,0 +1,14 @@
+# Core
+torch>=2.0
+
+# TileScale ships the TileLang python package ("import tilelang").
+# Easiest: the upstream TileLang wheel (TileScale keeps its compiler/JIT/cache
+# interfaces and runs ordinary TileLang programs unchanged).
+tilelang>=0.1.14
+
+# Alternative (single-host multi-GPU distributed runtime + newest kernels):
+#   git clone --recursive https://github.com/tile-ai/tilescale
+#   pip install -v ./tilescale        # build from source, see scripts/install_tilescale.sh
+
+requests
+pytest
