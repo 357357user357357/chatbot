@@ -230,6 +230,24 @@ The CMP 50HX (TU102, Turing, sm_75, 10 GB) is comfortably within reach for
 this workload: the tutorial model is tiny (hidden 500, batch 64,
 `MAX_LENGTH` 10) and fp32 training fits in a few GB of device memory.
 
+The quickest path is the one-shot installer, which is safe to re-run:
+
+```bash
+bash scripts/install_50hx.sh
+```
+
+It checks the driver and compute capability (torch cu130 wheels need
+sm ≥ 7.5), checks `nvcc`, sets up the venv and installs
+`requirements.txt` (reinstalling torch from the cu130 index if the PyPI
+build somehow lacks CUDA), then probes the toolchain the same way the JIT
+does — `nvcc -ccbin=<c++>` — and reports which host compiler was picked
+(tilechat auto-switches to an older `/usr/bin/g++-N` when nvcc rejects the
+default one; override with `CXX`/`CC`). Finally it runs the full
+validation chain below including the strict `TILECHAT_BACKEND=tilescale`
+check.
+
+Manual equivalent:
+
 1. Install CUDA-capable torch + `nvcc` (TileLang needs `nvcc` in `PATH`
    at first JIT).
 2. `pip install -r requirements.txt`
@@ -244,9 +262,17 @@ Notes for the 50HX run:
 
 * **First iterations are slow** (JIT compiles a handful of
   shape-specialized kernels; cached afterwards).
-* Keep gcc ≤ the version supported by the installed nvcc (this repo was
-  developed on a box where nvcc 12.4 + gcc-14 could not link; a CUDA-13
-  toolkit resolves it).
+* tilelang compiles with `nvcc -ccbin=<host c++>`; nvcc rejects host
+  compilers newer than it supports (seen in the wild: nvcc 12.4 vs
+  g++ 15). Before the first JIT, tilechat probes that exact command and
+  auto-switches `CXX` to the newest compatible `/usr/bin/g++-N`
+  (`sudo apt install g++-13` provides one); setting `CXX`/`CC` yourself
+  overrides the probe entirely.
+* Multi-GPU boxes: cuDNN ≥ 9.11 refuses to run in a process that can see
+  *any* GPU older than sm_75 — the tutorial encoder's cuDNN GRU then dies
+  with "cuDNN version … is not compatible with devices with SM < 7.5".
+  Hide the old card with `CUDA_VISIBLE_DEVICES=0` (the install script does
+  this automatically and prints the line to export).
 * `TILECHAT_BACKEND=tilescale python -m tilechat check` is a strict check
   (errors instead of silently falling back).
 * The 10 GB leaves headroom for `--batch-size 128` or
@@ -258,6 +284,16 @@ Notes for the 50HX run:
   Wook Kim et al.).
 * Kernel language: [tile-ai/tilelang](https://github.com/tile-ai/tilelang)
   / [tile-ai/tilescale](https://github.com/tile-ai/tilescale) (Apache-2.0).
+* Related: [tile-ai/TileOPs](https://github.com/tile-ai/TileOPs) (MIT) — a
+  spec-driven LLM operator library built on TileLang (GEMM, attention, …;
+  auto-tuned, CUDA-Graph compatible, fp16/bf16). Worth reading for how
+  production TileLang kernels are structured (manifest/spec discipline,
+  roofline-scored benchmarks). **Not a dependency here**: it installs from
+  source, targets compute-capability **9.0 (Hopper)** GPUs with CUDA
+  Toolkit 13.2, so its ops cannot execute on the CMP 50HX (sm_75) — and
+  this repo's kernels are fp32 for tutorial fidelity, whereas TileOPs is
+  fp16/bf16. Revisit it when porting these kernels to an SM90 GPU or when
+  switching the pipeline to half precision.
 * Deviations from the tutorial: `ast.literal_eval` instead of `eval` in
   the conversation parser; field lists passed as ordered lists; training
   batches drawn lazily per iteration (identical distribution); checkpoints

@@ -27,7 +27,12 @@ CPU laptops.  Select the backend with ``TILECHAT_BACKEND=auto|tilescale|pytorch`
 
 from __future__ import annotations
 
+import glob
 import os
+import re
+import shutil
+import subprocess
+import tempfile
 import threading
 from typing import Dict, Tuple
 
@@ -273,6 +278,106 @@ def _warn_once(msg: str) -> None:
         print(f"[tilechat] {msg}")
 
 
+# ---------------------------------------------------------------------------
+# JIT host-compiler bootstrap.
+#
+# tilelang JIT-compiles by invoking ``nvcc -ccbin=<host c++> ...``, where the
+# host compiler is resolved from the CXX/CC env vars, falling back to the
+# first g++/clang++/c++ on PATH (tilelang.contrib.cc.get_cplus_compiler,
+# functools.cache'd at first call).  On toolchains where that compiler is
+# newer than the installed nvcc supports -- seen in the wild: nvcc 12.4
+# rejecting g++ 15 with "#error -- unsupported GNU version! gcc versions
+# later than 13 are not supported" -- the first kernel compile would die
+# before producing anything.  We probe exactly that nvcc command once, and
+# if the default host compiler is rejected, look for an older /usr/bin/g++-N
+# that nvcc accepts and point CXX at it (before tilelang caches its choice).
+# Setting CXX or CC yourself short-circuits this entirely.
+# ---------------------------------------------------------------------------
+
+_HOST_COMPILER_DONE = False
+host_compiler_note: str = ""
+
+_TRIVIAL_CU = "__global__ void tilechat_probe_kernel(int* p) { *p = 42; }\n"
+
+
+def _probe_nvcc(nvcc: str, cxx: str) -> bool:
+    """True if ``nvcc -ccbin=cxx`` accepts a trivial kernel (tilelang-style)."""
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "probe.cu")
+        out = os.path.join(td, "probe.cubin")
+        with open(src, "w") as f:
+            f.write(_TRIVIAL_CU)
+        try:
+            r = subprocess.run(
+                [nvcc, f"-ccbin={cxx}", "-std=c++20", "--cubin", "-o", out, src],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return r.returncode == 0
+
+
+def _default_host_cxx() -> str | None:
+    """Mirror tilelang.contrib.cc.get_cplus_compiler()'s PATH fallback."""
+    for name in ("g++", "clang++", "c++"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _gxx_version_key(path: str) -> list:
+    m = re.search(r"g\+\+-([\d.]+)$", path)
+    return [int(x) for x in m.group(1).split(".")] if m else [0]
+
+
+def _ensure_jit_host_compiler() -> None:
+    """Pick a C++ host compiler the installed nvcc accepts (once, if needed)."""
+    global _HOST_COMPILER_DONE, host_compiler_note
+    if _HOST_COMPILER_DONE:
+        return
+    _HOST_COMPILER_DONE = True
+    if os.environ.get("CXX") or os.environ.get("CC"):
+        host_compiler_note = "using CXX/CC from the environment"
+        return  # explicit user override; respect it as-is
+    nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        return  # no toolkit in PATH: JIT reports its own error later
+    cxx = _default_host_cxx()
+    if cxx is None:
+        return
+    if _probe_nvcc(nvcc, cxx):
+        host_compiler_note = f"host compiler {cxx} accepted by nvcc"
+        return
+    # Default host compiler rejected by nvcc (e.g. newer g++ than the toolkit
+    # supports).  Try the versioned alternatives on PATH / in /usr/bin.
+    candidates = sorted(
+        {
+            os.path.join(d, os.path.basename(p))
+            for d in list(os.get_exec_path()) + ["/usr/bin"]
+            for p in glob.glob(os.path.join(d, "g++-*"))
+            if os.path.isfile(p) and os.access(p, os.X_OK)
+        },
+        key=_gxx_version_key,
+        reverse=True,
+    )
+    for cand in candidates:
+        if _probe_nvcc(nvcc, cand):
+            os.environ["CXX"] = cand  # read by tilelang before its first JIT
+            host_compiler_note = (
+                f"nvcc rejected {cxx} (unsupported GNU version); "
+                f"TileLang JIT host compiler switched to {cand}"
+            )
+            return
+    host_compiler_note = (
+        f"no nvcc-compatible C++ host compiler found (tried {cxx} and "
+        f"{candidates or 'none'}); JIT will fail -- install an older g++ "
+        "(e.g. sudo apt install g++-13) or a newer CUDA toolkit"
+    )
+
+
 def _get_kernel(fn, params: dict):
     """Compile-once cache: kernels are shape-specialized by TileLang's JIT."""
     # @tilelang.jit objects may not expose __name__; fall back to repr.
@@ -281,6 +386,7 @@ def _get_kernel(fn, params: dict):
     with _LOCK:
         kern = _CACHE.get(key)
         if kern is None:
+            _ensure_jit_host_compiler()  # before tilelang caches its CXX choice
             kern = fn.compile(**params)
             _CACHE[key] = kern
     return kern

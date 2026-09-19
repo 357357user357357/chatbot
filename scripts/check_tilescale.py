@@ -16,6 +16,8 @@ import os
 import sys
 import time
 
+import torch
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -24,7 +26,8 @@ def _cuda_op_works() -> bool:
     try:
         _ = (torch.zeros(1, device="cuda") + 1).item()
         return True
-    except Exception:
+    except Exception as e:
+        print(f"cuda probe op failed: {type(e).__name__}: {e}")
         return False
 
 
@@ -32,8 +35,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bench", action="store_true", help="also measure latencies")
     args = ap.parse_args()
-
-    import torch
 
     print("torch            :", torch.__version__)
     print("cuda available   :", torch.cuda.is_available())
@@ -54,6 +55,12 @@ def main():
         print("\nCUDA device missing or unusable by this torch build -- kernel")
         print("validation must run on a GPU box (e.g. the CMP 50HX).")
         return 1
+
+    from tilechat import kernels as _tk
+
+    _tk._ensure_jit_host_compiler()
+    if _tk.host_compiler_note:
+        print("host compiler    :", _tk.host_compiler_note)
 
     from tilechat.kernels import (
         TiledAttention,
