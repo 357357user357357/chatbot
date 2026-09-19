@@ -125,16 +125,68 @@ def train(input_variable, lengths, target_variable, mask, max_target_len,
     return loss, print_losses, n_totals
 
 
+def validate(val_pairs, voc, encoder, decoder, embedding, batch_size, seed=1234):
+    """Held-out loss, teacher forced, in the same normalization as training.
+
+    Deterministic (fixed batch order), computed in eval() mode under no_grad.
+    Returns the average over batches of the per-sequence summed NLL -- i.e.
+    directly comparable to the "Average loss" printed during training.
+    """
+    was_training_en, was_training_dec = encoder.training, decoder.training
+    encoder.eval()
+    decoder.eval()
+    order = list(val_pairs)
+    random.Random(seed).shuffle(order)
+    total, n_batches = 0.0, 0
+    with torch.no_grad():
+        for i in range(0, len(order) - batch_size + 1, batch_size):
+            input_variable, lengths, target_variable, mask, max_target_len = batch2TrainData(
+                voc, order[i:i + batch_size]
+            )
+            input_variable = input_variable.to(device)
+            lengths = lengths.to("cpu")
+            target_variable = target_variable.to(device)
+            mask = mask.to(device)
+
+            encoder_outputs, encoder_hidden = encoder(input_variable, lengths)
+            decoder_input = torch.LongTensor(
+                [[SOS_token] * input_variable.size(1)]
+            ).to(device)
+            decoder_hidden = encoder_hidden[: decoder.n_layers]
+
+            loss = 0
+            for t in range(max_target_len):
+                decoder_output, decoder_hidden = decoder(
+                    decoder_input, decoder_hidden, encoder_outputs
+                )
+                mask_loss, _ = maskNLLLoss(decoder_output, target_variable[t], mask[t])
+                loss += mask_loss
+                decoder_input = target_variable[t].view(1, -1)  # teacher forcing
+            total += loss.item()
+            n_batches += 1
+
+    if was_training_en:
+        encoder.train()
+    if was_training_dec:
+        decoder.train()
+    return total / max(n_batches, 1)
+
+
 def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
                decoder_optimizer, embedding, encoder_n_layers, decoder_n_layers,
                save_dir, n_iteration, batch_size, print_every, save_every, clip,
-               corpus_name, teacher_forcing_ratio=TEACHER_FORCING_RATIO):
+               corpus_name, teacher_forcing_ratio=TEACHER_FORCING_RATIO,
+               val_pairs=None, start_iteration=1):
     # Load batches for each iteration (built lazily here -- the tutorial
     # pre-materialises all n_iteration batches; the distribution is identical
     # because every batch is drawn with random.choice).
-    print("Training for {} iterations...".format(n_iteration))
-    start_iteration = 1
+    print("Training for {} iterations (starting at iteration {})...".format(
+        n_iteration, start_iteration))
     print_loss = 0
+
+    if val_pairs:
+        print("Initial validation loss: {:.4f}".format(
+            validate(val_pairs, voc, encoder, decoder, embedding, batch_size)))
 
     # Training loop
     for iteration in range(start_iteration, n_iteration + 1):
@@ -161,6 +213,10 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer,
                     iteration, iteration / n_iteration * 100, print_loss_avg
                 )
             )
+            if val_pairs:
+                print("Validation loss: {:.4f}".format(
+                    validate(val_pairs, voc, encoder, decoder, embedding, batch_size)
+                ))
             print_loss = 0
 
         # Save checkpoint

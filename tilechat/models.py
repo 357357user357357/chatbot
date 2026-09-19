@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .data import MAX_LENGTH, SOS_token
+from .data import EOS_token, MAX_LENGTH, PAD_token, SOS_token
 from .kernels import TiledAttention, TiledGRUStep, kernels_usable
 
 # The tutorial's config (model/config section)
@@ -254,6 +254,107 @@ class GreedySearchDecoder(nn.Module):
             # Prepare current token to be next decoder input
             decoder_input = decoder_input.view(1, -1)
         # Return collections of word tokens and scores
+        return all_tokens, all_scores
+
+
+class BeamSearchDecoder(nn.Module):
+    """Beam-search decoding -- the tutorial's upgrade over greedy search.
+
+    Same (tokens, scores) return contract as GreedySearchDecoder.  Width 1
+    reproduces greedy exactly when ``no_repeat_trigram=False`` (blocking and
+    EOS halting are deliberate departures from the tutorial's walk-it-anyway
+    greedy).  Larger widths trade compute for sequence likelihood; finished
+    candidates are ranked by ``score / length ** length_penalty`` and optional
+    trigram blocking stops ``. . . .``-style repetition loops.
+    """
+
+    def __init__(self, encoder, decoder, beam_width=5, length_penalty=0.7,
+                 no_repeat_trigram=True):
+        super(BeamSearchDecoder, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        if beam_width < 1:
+            raise ValueError("beam_width must be >= 1")
+        self.beam_width = int(beam_width)
+        self.length_penalty = float(length_penalty)
+        self.no_repeat_trigram = bool(no_repeat_trigram)
+
+    def _banned_tokens(self, tokens):
+        """Ids that would complete a trigram already seen in ``tokens``."""
+        if not self.no_repeat_trigram or len(tokens) < 3:
+            return ()
+        seen = {}
+        for i in range(len(tokens) - 2):
+            seen.setdefault((tokens[i], tokens[i + 1]), set()).add(tokens[i + 2])
+        return tuple(seen.get((tokens[-2], tokens[-1]), ()))
+
+    def forward(self, input_seq, input_length, max_length=MAX_LENGTH):
+        # Inference only: skip the autograd graph (also silences the
+        # requires_grad-scalar warning from the float() conversions below)
+        with torch.no_grad():
+            return self._search(input_seq, input_length, max_length)
+
+    def _search(self, input_seq, input_length, max_length=MAX_LENGTH):
+        K = self.beam_width
+        V = self.decoder.out.weight.shape[0]
+        # Encode once, then replicate across the beam batch
+        encoder_outputs, encoder_hidden = self.encoder(input_seq, input_length)
+        enc_outputs = encoder_outputs.expand(-1, K, -1).contiguous()    # (L, K, H)
+        decoder_hidden = encoder_hidden[: self.decoder.n_layers]
+        decoder_hidden = decoder_hidden.expand(-1, K, -1).contiguous()  # (nl, K, H)
+
+        tokens = [[SOS_token] for _ in range(K)]      # token id lists per beam
+        cum_logp = torch.zeros(K, device=device)      # cumulative log-prob
+        step_logp = [[] for _ in range(K)]            # per-step chosen log-prob
+        is_done = [False] * K
+        finished = []                                 # (tokens, total logp, steps)
+
+        for _ in range(max_length):
+            prev = cum_logp
+            decoder_input = torch.tensor(
+                [[t[-1] for t in tokens]], device=device, dtype=torch.long
+            )
+            decoder_output, decoder_hidden = self.decoder(
+                decoder_input, decoder_hidden, enc_outputs
+            )
+            logp = decoder_output.clamp_min(1e-12).log() + prev.view(1, -1).t()
+            # Freeze finished beams on PAD at an unchanged score; otherwise ban
+            # continuations that would repeat a trigram
+            for b in range(K):
+                if is_done[b]:
+                    logp[b, :] = float("-inf")
+                    logp[b, PAD_token] = prev[b]
+                else:
+                    for wid in self._banned_tokens(tokens[b]):
+                        logp[b, wid] = float("-inf")
+            top_scores, top_idx = logp.view(-1).topk(K)
+            parent_idx = top_idx // V
+            parent = parent_idx.tolist()
+            chosen = (top_idx % V).tolist()
+
+            tokens = [tokens[p] + [w] for p, w in zip(parent, chosen)]
+            decoder_hidden = decoder_hidden[:, parent_idx, :]
+            step_logp = [step_logp[p] + [float(s) - float(prev[p])]
+                         for p, s in zip(parent, top_scores.tolist())]
+            cum_logp = top_scores
+            for b in range(K):
+                if not is_done[b] and chosen[b] == EOS_token:
+                    is_done[b] = True
+                    finished.append((tokens[b], float(cum_logp[b]), list(step_logp[b])))
+            if all(is_done):
+                break
+
+        for b in range(K):
+            if not is_done[b]:
+                finished.append((tokens[b], float(cum_logp[b]), step_logp[b]))
+        best = max(
+            finished,
+            key=lambda c: c[1] / max(len(c[0]) - 1, 1) ** self.length_penalty,
+        )
+        toks, _total, per_step = best
+        # Drop the leading SOS; keep EOS (evaluateInput filters it out anyway)
+        all_tokens = torch.tensor(toks[1:], device=device, dtype=torch.long).view(-1, 1)
+        all_scores = torch.tensor(per_step, device=device).view(-1, 1)
         return all_tokens, all_scores
 
 

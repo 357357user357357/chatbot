@@ -64,6 +64,13 @@ def test_end_to_end_tiny_training(tmp_path):
     words = [voc.index2word[int(t)] for t in tokens]
     print("input:", sentence, "-> decoded:", " ".join(w for w in words if w not in ("EOS", "PAD")))
 
+    # 5) held-out validation loss must be finite and positive
+    from tilechat.training import validate
+
+    val_loss = validate(pairs[:128], voc, encoder, decoder, embedding, batch_size=32)
+    assert torch.isfinite(torch.tensor(val_loss)) and val_loss > 0
+    print("validation loss (untrained tiny model):", round(val_loss, 3))
+
 
 def test_greedy_decoder_temperature_modes():
     """temperature=0 must stay exact argmax; temperature>0 must sample."""
@@ -93,3 +100,44 @@ def test_greedy_decoder_temperature_modes():
     #    near-uniform 50-way distribution colliding is vanishingly unlikely)
     s2, _ = GreedySearchDecoder(encoder, decoder, temperature=1.0, seed=124)(seq, lengths, max_length=6)
     assert not torch.equal(s1a, s2)
+
+
+def test_beam_search_decoder_matches_greedy_at_width_1():
+    """Beam width 1 must equal greedy; width 5 must be deterministic."""
+    from tilechat.models import (
+        BeamSearchDecoder,
+        EncoderRNN,
+        GreedySearchDecoder,
+        LuongAttnDecoderRNN,
+        device,
+    )
+
+    torch.manual_seed(0)
+    V, H, L = 50, 16, 7
+    embedding = torch.nn.Embedding(V, H)
+    encoder = EncoderRNN(V, H, 1, dropout=0.0).to(device).eval()
+    decoder = LuongAttnDecoderRNN(
+        "dot", embedding, H, V, n_layers=1, dropout=0.0, backend="pytorch"
+    ).to(device).eval()
+    seq = torch.randint(3, V, (L, 1), device=device)
+    lengths = torch.tensor([L])
+
+    greedy, _ = GreedySearchDecoder(encoder, decoder)(seq, lengths, max_length=6)
+    # width 1 without blocking must reproduce the greedy walk exactly
+    beam1, _ = BeamSearchDecoder(encoder, decoder, beam_width=1, no_repeat_trigram=False)(
+        seq, lengths, max_length=6
+    )
+    assert torch.equal(greedy, beam1)
+
+    # with blocking on, the output must not contain any repeated trigram
+    # (even when greedy itself loops, e.g. 22 22 22 ...)
+    blocked, _ = BeamSearchDecoder(encoder, decoder, beam_width=1)(seq, lengths, max_length=6)
+    words = blocked.view(-1).tolist()
+    trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
+    assert len(trigrams) == len(set(trigrams))
+
+    beam5a, scores = BeamSearchDecoder(encoder, decoder, beam_width=5)(seq, lengths, max_length=6)
+    beam5b, _ = BeamSearchDecoder(encoder, decoder, beam_width=5)(seq, lengths, max_length=6)
+    assert torch.equal(beam5a, beam5b)  # deterministic (no sampling involved)
+    assert beam5a.shape[1] == 1
+    assert beam5a.shape[0] == scores.shape[0] and beam5a.shape[0] <= 6

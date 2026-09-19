@@ -30,7 +30,7 @@ import os
 import torch
 import torch.nn as nn
 
-from .data import Voc, loadPrepareData, trimRareWords
+from .data import Voc, loadPrepareData, splitTrainVal, trimRareWords
 from .kernels import tilelang_available
 from .models import (
     ATTN_MODEL,
@@ -39,6 +39,7 @@ from .models import (
     ENCODER_N_LAYERS,
     HIDDEN_SIZE,
     MODEL_NAME,
+    BeamSearchDecoder,
     EncoderRNN,
     GreedySearchDecoder,
     LuongAttnDecoderRNN,
@@ -76,7 +77,38 @@ def _make_models(voc, args):
 def cmd_train(args):
     voc, pairs = loadPrepareData()
     pairs = trimRareWords(voc, pairs)
+
+    ckpt = None
+    start_iteration = 1
+    if getattr(args, "resume", None):
+        if not os.path.exists(args.resume):
+            raise SystemExit(f"checkpoint not found: {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        # Rebuild the vocabulary and architecture exactly as stored
+        voc = Voc("cornell movie-dialogs corpus")
+        voc.__dict__.update(ckpt["voc"])
+        config = ckpt.get("config", {})
+        args.hidden_size = config.get("hidden_size", args.hidden_size)
+        args.encoder_layers = config.get("encoder_layers", args.encoder_layers)
+        args.decoder_layers = config.get("decoder_layers", args.decoder_layers)
+        args.dropout = config.get("dropout", args.dropout)
+        args.attn_model = config.get("attn_model", args.attn_model)
+
+    # Hold out a validation set (deterministic split, seed fixed) unless the
+    # caller opts out with --val-frac 0
+    val_pairs = None
+    if getattr(args, "val_frac", 0.0) > 0:
+        pairs, val_pairs = splitTrainVal(pairs, val_frac=args.val_frac)
+        print("Held out {} validation pairs ({} training pairs)".format(
+            len(val_pairs), len(pairs)))
+
     embedding, encoder, decoder = _make_models(voc, args)
+    if ckpt is not None:
+        embedding.load_state_dict(ckpt["emb"])
+        encoder.load_state_dict(ckpt["en"])
+        decoder.load_state_dict(ckpt["de"])
+        start_iteration = ckpt.get("iteration", 1)
+        print("Resumed from {} at iteration {}".format(args.resume, start_iteration))
 
     # Initialize optimizers (the tutorial uses ASGD)
     print("Building optimizers ...")
@@ -84,6 +116,10 @@ def cmd_train(args):
     decoder_optimizer = torch.optim.ASGD(
         decoder.parameters(), lr=args.learning_rate * args.decoder_learning_ratio
     )
+    if ckpt is not None and "optimizer_en" in ckpt:
+        encoder_optimizer.load_state_dict(ckpt["optimizer_en"])
+        decoder_optimizer.load_state_dict(ckpt["optimizer_de"])
+        print("Restored optimizer states")
 
     print("Models built! (device: {}, backend policy: {})".format(device, args.backend))
 
@@ -93,6 +129,7 @@ def cmd_train(args):
         args.encoder_layers, args.decoder_layers, args.save_dir,
         args.iterations, args.batch_size, args.print_every, args.save_every, args.clip,
         "cornell movie-dialogs corpus",
+        start_iteration=start_iteration, val_pairs=val_pairs,
     )
 
     # Stash a checkpoint under the save dir root for easy chatting
@@ -145,10 +182,14 @@ def cmd_chat(args):
     encoder.eval()
     decoder.eval()
 
-    searcher = GreedySearchDecoder(encoder, decoder, temperature=args.temperature, seed=args.seed)
-    if args.temperature > 0:
-        print(f"Sampling at temperature {args.temperature}"
-              + (f" (seed {args.seed})" if args.seed is not None else " (unseeded)"))
+    if args.beams > 0:
+        searcher = BeamSearchDecoder(encoder, decoder, beam_width=args.beams)
+        print("Beam search: width={}, length_penalty=0.7, trigram blocking on".format(args.beams))
+    else:
+        searcher = GreedySearchDecoder(encoder, decoder, temperature=args.temperature, seed=args.seed)
+        if args.temperature > 0:
+            print(f"Sampling at temperature {args.temperature}"
+                  + (f" (seed {args.seed})" if args.seed is not None else " (unseeded)"))
     print("Chat away! ('q' or 'quit' to exit)")
     evaluateInput(encoder, decoder, searcher, voc)
 
@@ -218,7 +259,12 @@ def build_parser():
     common.add_argument("--attn-model", default=ATTN_MODEL, choices=["dot"])
 
     p_train = sub.add_parser("train", parents=[common], help="train the chatbot")
-    p_train.add_argument("--iterations", type=int, default=4000)
+    p_train.add_argument("--iterations", type=int, default=4000,
+                         help="TARGET total iteration count (with --resume: continue to here)")
+    p_train.add_argument("--resume", metavar="CKPT", default=None,
+                         help="continue training from a checkpoint (keeps iteration numbering)")
+    p_train.add_argument("--val-frac", type=float, default=0.02,
+                         help="fraction of pairs held out for validation (0 disables)")
     p_train.add_argument("--batch-size", type=int, default=64)
     p_train.add_argument("--clip", type=float, default=CLIP)
     p_train.add_argument("--learning-rate", type=float, default=LEARNING_RATE)
@@ -235,6 +281,9 @@ def build_parser():
                              "softmax at temperature T (0.7-1.0 shows the alternatives)")
     p_chat.add_argument("--seed", type=int, default=None,
                         help="seed for --temperature sampling (reproducible sessions)")
+    p_chat.add_argument("--beams", type=int, default=0,
+                        help=">0 = beam search width (e.g. 5) with length normalization "
+                             "and trigram blocking; overrides --temperature")
     p_chat.set_defaults(func=cmd_chat)
 
     p_check = sub.add_parser("check", parents=[common], help="verify TileScale kernels vs references")

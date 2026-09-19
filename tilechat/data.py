@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import itertools
 import os
+import random
 import re
 import unicodedata
 import urllib.request
@@ -216,6 +217,20 @@ def loadPrepareData(data_dir=None, corpus_name="cornell movie-dialogs corpus"):
         voc.addSentence(pair[1])
     print("Counted words:", voc.num_words)
     return voc, pairs
+
+
+def splitTrainVal(pairs, val_frac=0.02, seed=42):
+    """Deterministic train/validation split (same val set for every run).
+
+    The tutorial trains on 100% of the pairs, which makes "is it better?"
+    unanswerable -- there is no held-out loss to compare.  We shuffle with a
+    fixed seed and hold out ``val_frac`` of pairs.  The seed must stay fixed
+    across runs so validation numbers are comparable between checkpoints.
+    """
+    shuffled = list(pairs)
+    random.Random(seed).shuffle(shuffled)
+    n_val = max(1, int(round(len(shuffled) * val_frac)))
+    return shuffled[n_val:], shuffled[:n_val]
 
 
 def trimRareWords(voc, pairs, min_count=MIN_COUNT):

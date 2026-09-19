@@ -194,8 +194,18 @@ Tutorial hyper-parameters are the defaults: `hidden_size=500`,
 # train (kernels used automatically on CUDA; reference path on CPU)
 python -m tilechat train --iterations 4000
 
+# resume from a checkpoint up to a new target (keeps iteration numbering);
+# a deterministic 2% validation split is held out by default and its loss is
+# printed alongside the training loss at every --print-every
+python -m tilechat train --resume save/cb_model/final_checkpoint.tar --iterations 50000
+
 # chat with the trained model
 python -m tilechat chat --checkpoint save/cb_model/final_checkpoint.tar
+
+# beam search instead of greedy argmax (length-normalized, blocks repeated
+# trigrams like ". . . ." -- usually the best-looking replies from these
+# checkpoints)
+python -m tilechat chat --checkpoint save/cb_model/final_checkpoint.tar --beams 5
 
 # sampled replies instead of greedy argmax (temperature 0 = tutorial default;
 # ~0.7-1.0 reveals the alternative replies greedy never picks; --seed makes it
