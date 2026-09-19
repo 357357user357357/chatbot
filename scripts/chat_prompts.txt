@@ -1,0 +1,12 @@
+# Default smoke-test prompts for scripts/chat_compare.sh.
+# Short movie-style lines: the vocab was trimmed to MIN_COUNT=3, so rare or
+# modern words (e.g. "robot") print "Error: Encountered unknown word."
+hello
+how are you
+what do you do
+where are you from
+i love you
+i am sorry
+are you sure
+thank you
+goodbye

@@ -222,3 +222,7 @@ def evaluateInput(encoder, decoder, searcher, voc, max_length=MAX_LENGTH):
 
         except KeyError:
             print("Error: Encountered unknown word.")
+        except (EOFError, KeyboardInterrupt):
+            # Piped input (`printf 'hi\nq\n' | tilechat chat ...`) hits EOF
+            # instead of the "q" sentinel; exit cleanly instead of a traceback.
+            break
