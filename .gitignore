@@ -9,3 +9,5 @@ build/
 dist/
 *.tar
 .ipynb_checkpoints/
+logs/
+save_h1000/
